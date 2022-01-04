@@ -26,5 +26,8 @@
     <ClInclude Include="exception.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="AppEncUtilsD3D11.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

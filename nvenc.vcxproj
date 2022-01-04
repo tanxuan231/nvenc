@@ -149,6 +149,7 @@
     <ClCompile Include="nvenc.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="AppEncUtilsD3D11.h" />
     <ClInclude Include="exception.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

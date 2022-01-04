@@ -1,9 +1,11 @@
 ﻿#include <iostream>
 #include <fstream>
-#include "exception.h"
 #include <Windows.h>
 #include <wrl/client.h>
 #include <d3d11.h>
+
+#include "exception.h"
+#include "AppEncUtilsD3D11.h"
 
 using namespace std;
 using namespace Microsoft::WRL;
@@ -128,8 +130,7 @@ int main()
 
         // 3. 初始化编码器
         NV_ENC_PRESET_CONFIG presetConfig = { NV_ENC_PRESET_CONFIG_VER, { NV_ENC_CONFIG_VER } };
-        NVENC_API_CALL(m_nvenc.nvEncGetEncodePresetConfig(
-            hEncoder, NV_ENC_CODEC_H264_GUID, presetGuids[0], &presetConfig));
+        m_nvenc.nvEncGetEncodePresetConfig(hEncoder, NV_ENC_CODEC_H264_GUID, NV_ENC_PRESET_P3_GUID, &presetConfig);
         NV_ENC_CONFIG config = { NV_ENC_CONFIG_VER };
         memcpy(&config, &presetConfig.presetCfg, sizeof(config));
         config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
@@ -139,7 +140,7 @@ int main()
         NV_ENC_INITIALIZE_PARAMS encoder_init_params = { NV_ENC_INITIALIZE_PARAMS_VER };
         encoder_init_params.encodeConfig = &config;        
         encoder_init_params.encodeGUID = NV_ENC_CODEC_H264_GUID;
-        encoder_init_params.presetGUID = presetGuids[0];
+        encoder_init_params.presetGUID = NV_ENC_PRESET_P3_GUID;
         encoder_init_params.tuningInfo = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
         encoder_init_params.encodeWidth = yuvWidth;
         encoder_init_params.encodeHeight = yuvHeight;
@@ -164,23 +165,49 @@ int main()
         encoder_init_params.encodeConfig->encodeCodecConfig.h264Config.chromaFormatIDC = 1; // for yuv420 input
         NVENC_API_CALL(m_nvenc.nvEncInitializeEncoder(hEncoder, &encoder_init_params));
 
+        // 创建输入纹理资源
+        ID3D11Texture2D* pInputTextures = NULL;
+        ZeroMemory(&desc, sizeof(D3D11_TEXTURE2D_DESC));
+        desc.Width = yuvWidth;
+        desc.Height = yuvHeight;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_NV12;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        desc.CPUAccessFlags = 0;
+        if (pDevice->CreateTexture2D(&desc, NULL, &pInputTextures) != S_OK) {
+            NVENC_THROW_ERROR("Failed to create d3d11textures", NV_ENC_ERR_OUT_OF_MEMORY);
+        }
+
+        // 注册输入资源
+        NV_ENC_REGISTER_RESOURCE registerResource = { NV_ENC_REGISTER_RESOURCE_VER };
+        registerResource.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+        registerResource.resourceToRegister = pInputTextures;
+        registerResource.width = yuvWidth;
+        registerResource.height = yuvHeight;
+        registerResource.pitch = 0;
+        registerResource.bufferFormat = NV_ENC_BUFFER_FORMAT_NV12;
+        registerResource.bufferUsage = NV_ENC_INPUT_IMAGE;
+        registerResource.pInputFencePoint = NULL;
+        registerResource.pOutputFencePoint = NULL;
+        NVENC_API_CALL(m_nvenc.nvEncRegisterResource(hEncoder, &registerResource));
+
         // 4. 映射注册的输入资源
-        NV_ENC_REGISTER_RESOURCE resource = { 0 };
-        resource.version = NV_ENC_REGISTER_RESOURCE_VER;
-        resource.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
-        resource.bufferFormat = NV_ENC_BUFFER_FORMAT_NV12;
-        resource.bufferUsage = NV_ENC_INPUT_IMAGE;
-        resource.resourceToRegister = (void*)pTexSysMem.Get();
-        resource.width = yuvWidth;
-        resource.height = yuvHeight;
-        resource.pitch = 0;
         NV_ENC_MAP_INPUT_RESOURCE mapResource = { NV_ENC_MAP_INPUT_RESOURCE_VER };
-        mapResource.registeredResource = resource.registeredResource;
+        mapResource.registeredResource = registerResource.registeredResource;
         NVENC_API_CALL(m_nvenc.nvEncMapInputResource(hEncoder, &mapResource));
 
         // 5. 创建输出比特流缓冲
         NV_ENC_CREATE_BITSTREAM_BUFFER BitstreamBuffer = { NV_ENC_CREATE_BITSTREAM_BUFFER_VER };
         NVENC_API_CALL(m_nvenc.nvEncCreateBitstreamBuffer(hEncoder, &BitstreamBuffer));
+
+        std::unique_ptr<RGBToNV12ConverterD3D11> pConverter;
+        bool bForceNv12 = true;
+        if (bForceNv12) {
+            pConverter.reset(new RGBToNV12ConverterD3D11(pDevice.Get(), pContext.Get(), yuvWidth, yuvHeight));
+        }
 
         int size = yuvWidth * yuvHeight * 4;
         char* frame = new char[size];
@@ -190,7 +217,7 @@ int main()
             if (!readOneFrame(fin, frame, size)) {
                 break;
             }
-
+            
             // 输入数据map到已注册的纹理
             D3D11_MAPPED_SUBRESOURCE map;
             ck(pContext->Map(pTexSysMem.Get(), D3D11CalcSubresource(0, 0, 1), D3D11_MAP_WRITE, 0, &map));
@@ -198,6 +225,11 @@ int main()
                 memcpy((uint8_t*)map.pData + y * map.RowPitch, frame + y * yuvWidth * 4, yuvWidth * 4);
             }
             pContext->Unmap(pTexSysMem.Get(), D3D11CalcSubresource(0, 0, 1));
+            
+            if (bForceNv12) {
+                ID3D11Texture2D* pNV12Textyure = reinterpret_cast<ID3D11Texture2D*>(pInputTextures);
+                pConverter->ConvertRGBToNV12(pTexSysMem.Get(), pNV12Textyure);
+            }
 
             // 编码一帧
             NV_ENC_PIC_PARAMS pic_params = { 0 };
