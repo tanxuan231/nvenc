@@ -20,6 +20,7 @@ bool readOneFrame(ifstream& fin, char* frame, int size)
 {
     streamsize nread = fin.read(frame, size).gcount();
     if (nread != size) {
+        cout << "should read: " << size << ", but read: " << nread << endl;
         return false;
     }
     return true;
@@ -209,26 +210,37 @@ int main()
             pConverter.reset(new RGBToNV12ConverterD3D11(pDevice.Get(), pContext.Get(), yuvWidth, yuvHeight));
         }
 
-        int size = yuvWidth * yuvHeight * 4;
+        int size = 0;
+        if (bForceNv12) {
+            size = yuvWidth* yuvHeight * 3 / 2;
+        }
+            
         char* frame = new char[size];
         int frameCount = 0;
         while (true) {
-            // 读入输入数据
-            if (!readOneFrame(fin, frame, size)) {
+            // 读入一帧数据
+            cout << "start to read " << frameCount << endl;
+            if (!readOneFrame(fin, frame, size)) {                    
                 break;
             }
             
             // 输入数据map到已注册的纹理
             D3D11_MAPPED_SUBRESOURCE map;
             ck(pContext->Map(pTexSysMem.Get(), D3D11CalcSubresource(0, 0, 1), D3D11_MAP_WRITE, 0, &map));
-            for (int y = 0; y < yuvHeight; y++) {
-                memcpy((uint8_t*)map.pData + y * map.RowPitch, frame + y * yuvWidth * 4, yuvWidth * 4);
-            }
+            if (bForceNv12) {
+                memcpy((uint8_t*)map.pData, frame, size);
+            } else {
+                for (int y = 0; y < yuvHeight; y++) {
+                    memcpy((uint8_t*)map.pData + y * map.RowPitch, frame + y * yuvWidth * 4, yuvWidth * 4);
+                }
+            }            
             pContext->Unmap(pTexSysMem.Get(), D3D11CalcSubresource(0, 0, 1));
             
             if (bForceNv12) {
                 ID3D11Texture2D* pNV12Textyure = reinterpret_cast<ID3D11Texture2D*>(pInputTextures);
                 pConverter->ConvertRGBToNV12(pTexSysMem.Get(), pNV12Textyure);
+            } else {
+                pContext->CopyResource(pInputTextures, pTexSysMem.Get());
             }
 
             // 编码一帧
@@ -257,6 +269,9 @@ int main()
             NVENC_API_CALL(m_nvenc.nvEncUnlockBitstream(hEncoder, lockBitstreamData.outputBitstream));
 
             frameCount++;
+
+            fout.write(reinterpret_cast<char*>(out_data), datasize);
+            free(out_data);
         }
 
         cout << "frameCount: " << frameCount << endl;
