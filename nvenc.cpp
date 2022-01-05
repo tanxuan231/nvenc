@@ -32,6 +32,7 @@ int main()
     int yuvHeight = 288;
     string inFilePath = "yuv/akiyo_cif_352x288.yuv";
     string outFilePath = "out.h264";
+    bool bForceNv12 = false;
 
     ifstream fin(inFilePath, std::ios::in | std::ios::binary);
     if (fin.fail()) {
@@ -46,7 +47,7 @@ int main()
     }
 
     try {
-        NV_ENCODE_API_FUNCTION_LIST m_nvenc;
+        NV_ENCODE_API_FUNCTION_LIST encFunList;
 
         // 版本校验
         uint32_t version = 0;
@@ -58,9 +59,9 @@ int main()
         }
 
         // 1. 加载NVENCODE API
-        m_nvenc = { NV_ENCODE_API_FUNCTION_LIST_VER };
-        NVENC_API_CALL(NvEncodeAPICreateInstance(&m_nvenc));
-        if (!m_nvenc.nvEncOpenEncodeSession) {
+        encFunList = { NV_ENCODE_API_FUNCTION_LIST_VER };
+        NVENC_API_CALL(NvEncodeAPICreateInstance(&encFunList));
+        if (!encFunList.nvEncOpenEncodeSession) {
             NVENC_THROW_ERROR("EncodeAPI not found", NV_ENC_ERR_NO_ENCODE_DEVICE);
         }
 
@@ -106,32 +107,32 @@ int main()
         encodeSessionExParams.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
         encodeSessionExParams.apiVersion = NVENCAPI_VERSION;
         void* hEncoder = NULL;
-        NVENC_API_CALL(m_nvenc.nvEncOpenEncodeSessionEx(&encodeSessionExParams, &hEncoder));
+        NVENC_API_CALL(encFunList.nvEncOpenEncodeSessionEx(&encodeSessionExParams, &hEncoder));
 
         cout << "open encoder session success" << endl;
 
-        // 获取编码器支持的编码GUID
+        // 3.1 获取编码器支持的编码GUID
         uint32_t encodeGUIDCount;
-        NVENC_API_CALL(m_nvenc.nvEncGetEncodeGUIDCount(hEncoder, &encodeGUIDCount));
+        NVENC_API_CALL(encFunList.nvEncGetEncodeGUIDCount(hEncoder, &encodeGUIDCount));
         if (encodeGUIDCount < 1) {
             return 0;
         }
         GUID* guids = new GUID[encodeGUIDCount];
         uint32_t tmpCount;
-        NVENC_API_CALL(m_nvenc.nvEncGetEncodeGUIDs(hEncoder, guids, encodeGUIDCount, &tmpCount));
+        NVENC_API_CALL(encFunList.nvEncGetEncodeGUIDs(hEncoder, guids, encodeGUIDCount, &tmpCount));
 
-        // 获取preset guid
+        // 3.2 获取preset guid
         uint32_t encodePresetGUIDCount;
-        NVENC_API_CALL(m_nvenc.nvEncGetEncodePresetCount(hEncoder, NV_ENC_CODEC_H264_GUID, &encodePresetGUIDCount));
+        NVENC_API_CALL(encFunList.nvEncGetEncodePresetCount(hEncoder, NV_ENC_CODEC_H264_GUID, &encodePresetGUIDCount));
         if (encodePresetGUIDCount < 1) {
             return 0;
         }
         GUID* presetGuids = new GUID[encodePresetGUIDCount];
-        NVENC_API_CALL(m_nvenc.nvEncGetEncodePresetGUIDs(hEncoder, NV_ENC_CODEC_H264_GUID, presetGuids, encodePresetGUIDCount, &tmpCount));
+        NVENC_API_CALL(encFunList.nvEncGetEncodePresetGUIDs(hEncoder, NV_ENC_CODEC_H264_GUID, presetGuids, encodePresetGUIDCount, &tmpCount));
 
-        // 3. 初始化编码器
+        // 3.3 初始化编码器
         NV_ENC_PRESET_CONFIG presetConfig = { NV_ENC_PRESET_CONFIG_VER, { NV_ENC_CONFIG_VER } };
-        m_nvenc.nvEncGetEncodePresetConfig(hEncoder, NV_ENC_CODEC_H264_GUID, NV_ENC_PRESET_P3_GUID, &presetConfig);
+        encFunList.nvEncGetEncodePresetConfig(hEncoder, NV_ENC_CODEC_H264_GUID, NV_ENC_PRESET_P3_GUID, &presetConfig);
         NV_ENC_CONFIG config = { NV_ENC_CONFIG_VER };
         memcpy(&config, &presetConfig.presetCfg, sizeof(config));
         config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
@@ -156,15 +157,17 @@ int main()
         bool exConfig = false;
         if (exConfig) {
             NV_ENC_PRESET_CONFIG presetConfig = { NV_ENC_PRESET_CONFIG_VER, { NV_ENC_CONFIG_VER } };
-            m_nvenc.nvEncGetEncodePresetConfigEx(hEncoder,
+            encFunList.nvEncGetEncodePresetConfigEx(hEncoder,
                 NV_ENC_CODEC_H264_GUID,
                 NV_ENC_PRESET_P3_GUID,
                 NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY,
                 &presetConfig);
             memcpy(encoder_init_params.encodeConfig, &presetConfig.presetCfg, sizeof(NV_ENC_CONFIG));
         }
-        encoder_init_params.encodeConfig->encodeCodecConfig.h264Config.chromaFormatIDC = 1; // for yuv420 input
-        NVENC_API_CALL(m_nvenc.nvEncInitializeEncoder(hEncoder, &encoder_init_params));
+        if (bForceNv12) {
+            encoder_init_params.encodeConfig->encodeCodecConfig.h264Config.chromaFormatIDC = 1; // for yuv420 input
+        }
+        NVENC_API_CALL(encFunList.nvEncInitializeEncoder(hEncoder, &encoder_init_params));
 
         // 创建输入纹理资源
         ID3D11Texture2D* pInputTextures = NULL;
@@ -182,7 +185,7 @@ int main()
             NVENC_THROW_ERROR("Failed to create d3d11textures", NV_ENC_ERR_OUT_OF_MEMORY);
         }
 
-        // 注册输入资源
+        // 4 注册输入资源
         NV_ENC_REGISTER_RESOURCE registerResource = { NV_ENC_REGISTER_RESOURCE_VER };
         registerResource.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
         registerResource.resourceToRegister = pInputTextures;
@@ -193,19 +196,18 @@ int main()
         registerResource.bufferUsage = NV_ENC_INPUT_IMAGE;
         registerResource.pInputFencePoint = NULL;
         registerResource.pOutputFencePoint = NULL;
-        NVENC_API_CALL(m_nvenc.nvEncRegisterResource(hEncoder, &registerResource));
+        NVENC_API_CALL(encFunList.nvEncRegisterResource(hEncoder, &registerResource));
 
-        // 4. 映射注册的输入资源
+        // 5. 映射注册的输入资源
         NV_ENC_MAP_INPUT_RESOURCE mapResource = { NV_ENC_MAP_INPUT_RESOURCE_VER };
         mapResource.registeredResource = registerResource.registeredResource;
-        NVENC_API_CALL(m_nvenc.nvEncMapInputResource(hEncoder, &mapResource));
+        NVENC_API_CALL(encFunList.nvEncMapInputResource(hEncoder, &mapResource));
 
-        // 5. 创建输出比特流缓冲
+        // 6. 创建输出比特流缓冲
         NV_ENC_CREATE_BITSTREAM_BUFFER BitstreamBuffer = { NV_ENC_CREATE_BITSTREAM_BUFFER_VER };
-        NVENC_API_CALL(m_nvenc.nvEncCreateBitstreamBuffer(hEncoder, &BitstreamBuffer));
+        NVENC_API_CALL(encFunList.nvEncCreateBitstreamBuffer(hEncoder, &BitstreamBuffer));
 
-        std::unique_ptr<RGBToNV12ConverterD3D11> pConverter;
-        bool bForceNv12 = true;
+        std::unique_ptr<RGBToNV12ConverterD3D11> pConverter;        
         if (bForceNv12) {
             pConverter.reset(new RGBToNV12ConverterD3D11(pDevice.Get(), pContext.Get(), yuvWidth, yuvHeight));
         }
@@ -213,6 +215,8 @@ int main()
         int size = 0;
         if (bForceNv12) {
             size = yuvWidth* yuvHeight * 3 / 2;
+        } else {
+            size = yuvWidth * yuvHeight * 4;
         }
             
         char* frame = new char[size];
@@ -243,7 +247,7 @@ int main()
                 pContext->CopyResource(pInputTextures, pTexSysMem.Get());
             }
 
-            // 编码一帧
+            // 7 编码一帧
             NV_ENC_PIC_PARAMS pic_params = { 0 };
             pic_params.version = NV_ENC_PIC_PARAMS_VER;
             pic_params.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
@@ -253,26 +257,34 @@ int main()
             pic_params.inputHeight = yuvHeight;
             pic_params.outputBitstream = BitstreamBuffer.bitstreamBuffer;
             pic_params.inputTimeStamp = 0;
-            NVENC_API_CALL(m_nvenc.nvEncEncodePicture(hEncoder, &pic_params));
+            NVENC_API_CALL(encFunList.nvEncEncodePicture(hEncoder, &pic_params));
 
-            // 获取输出
+            // 8 获取输出
             NV_ENC_LOCK_BITSTREAM lockBitstreamData = { NV_ENC_LOCK_BITSTREAM_VER };
             lockBitstreamData.outputBitstream = BitstreamBuffer.bitstreamBuffer;
             lockBitstreamData.doNotWait = 0;
-            NVENC_API_CALL(m_nvenc.nvEncLockBitstream(hEncoder, &lockBitstreamData));
+            NVENC_API_CALL(encFunList.nvEncLockBitstream(hEncoder, &lockBitstreamData));
 
             unsigned char* out_data = NULL;
             int datasize = lockBitstreamData.bitstreamSizeInBytes;
             out_data = (unsigned char*)malloc(datasize);
             memcpy(out_data, lockBitstreamData.bitstreamBufferPtr, datasize);
 
-            NVENC_API_CALL(m_nvenc.nvEncUnlockBitstream(hEncoder, lockBitstreamData.outputBitstream));
+            NVENC_API_CALL(encFunList.nvEncUnlockBitstream(hEncoder, lockBitstreamData.outputBitstream));
 
             frameCount++;
 
             fout.write(reinterpret_cast<char*>(out_data), datasize);
             free(out_data);
         }
+
+        // 清理
+        delete[] frame;
+        fin.close();
+        fout.close();
+        NVENC_API_CALL(encFunList.nvEncUnmapInputResource(hEncoder, mapResource.mappedResource));
+        NVENC_API_CALL(encFunList.nvEncUnregisterResource(hEncoder, registerResource.registeredResource));
+        NVENC_API_CALL(encFunList.nvEncDestroyBitstreamBuffer(hEncoder, BitstreamBuffer.bitstreamBuffer));
 
         cout << "frameCount: " << frameCount << endl;
     }
